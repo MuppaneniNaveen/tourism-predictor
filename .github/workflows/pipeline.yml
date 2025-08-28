@@ -308,4 +308,4 @@ jobs:
           upload_file(path_or_fileobj=str(root/"requirements.txt"), path_in_repo="requirements.txt", repo_id=space_repo, repo_type="space", token=token)
           upload_file(path_or_fileobj=str(readme), path_in_repo="README.md", repo_id=space_repo, repo_type="space", token=token)
           print(f"Space updated: https://huggingface.co/spaces/{space_repo}")
-            PY
+          PY

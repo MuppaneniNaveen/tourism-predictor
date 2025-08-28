@@ -1,0 +1,168 @@
+name: Tourism Project Pipeline
+
+on:
+  push:
+    branches:
+      - main  # Automatically triggers on push to the main branch
+
+jobs:
+
+  register-dataset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "huggingface_hub>=0.24,<0.26" pandas
+      - name: Upload Dataset to Hugging Face Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi, HfFolder, create_repo, upload_file
+          token=os.environ["HF_TOKEN"]
+          HfFolder.save_token(token)
+          api=HfApi()
+          who=api.whoami(token=token)
+          username = who.get("name") or (who.get("orgs") or [None])[0]
+          repo_id=f"{username}/tourism-dataset"
+          create_repo(repo_id, repo_type="dataset", exist_ok=True, token=token)
+          upload_file("tourism_project/data/tourism.csv","data/tourism.csv",repo_id,"dataset",token)
+          print(f"Uploaded: https://huggingface.co/datasets/{repo_id}")
+          PY
+
+  data-prep:
+    needs: register-dataset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas scikit-learn "huggingface_hub>=0.24,<0.26"
+      - name: Run Data Preparation
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, pandas as pd
+          from sklearn.model_selection import train_test_split
+          from huggingface_hub import HfApi, hf_hub_download, upload_file
+          from pathlib import Path
+          token=os.environ["HF_TOKEN"]
+          api=HfApi(); who=api.whoami(token=token)
+          username=who.get("name") or (who.get("orgs") or [None])[0]
+          repo_id=f"{username}/tourism-dataset"
+          csv_path=hf_hub_download(repo_id, repo_type="dataset", filename="data/tourism.csv", token=token)
+          df=pd.read_csv(csv_path)
+          df.columns=[c.strip() for c in df.columns]
+          if "CustomerID" in df.columns: df=df.drop(columns=["CustomerID"])
+          df=df.loc[:,~df.columns.duplicated()].drop_duplicates()
+          if "ProdTaken" not in df.columns: raise SystemExit("ProdTaken not found")
+          df["ProdTaken"]=df["ProdTaken"].astype(int)
+          X=df.drop(columns=["ProdTaken"]); y=df["ProdTaken"]
+          X_tr,X_te,y_tr,y_te=train_test_split(X,y,test_size=0.2,random_state=42,stratify=y)
+          train=pd.concat([X_tr,y_tr],axis=1); test=pd.concat([X_te,y_te],axis=1)
+          out=Path("tourism_project/data"); out.mkdir(parents=True, exist_ok=True)
+          train.to_csv(out/"train.csv", index=False); test.to_csv(out/"test.csv", index=False)
+          upload_file(str(out/"train.csv"),"data/train.csv",repo_id,"dataset",token)
+          upload_file(str(out/"test.csv"),"data/test.csv",repo_id,"dataset",token)
+          print("Prepared splits and uploaded to dataset repo.")
+          PY
+
+  model-traning:
+    needs: data-prep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy==1.26.4" "scipy==1.11.4" "scikit-learn==1.3.2" pandas joblib "huggingface_hub>=0.24,<0.26" mlflow
+      - name: Start MLflow Server
+        run: |
+          nohup mlflow ui --host 0.0.0.0 --port 5000 &  # Run MLflow UI in the background
+          sleep 5  # Wait for a moment to let the server starts
+      - name: Model Building
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, pandas as pd, joblib, json
+          from pathlib import Path
+          from sklearn.compose import ColumnTransformer
+          from sklearn.preprocessing import OneHotEncoder, StandardScaler
+          from sklearn.impute import SimpleImputer
+          from sklearn.pipeline import Pipeline
+          from sklearn.ensemble import RandomForestClassifier
+          from sklearn import metrics as skm
+          from huggingface_hub import HfApi, HfFolder, hf_hub_download, create_repo, upload_file
+          token=os.environ["HF_TOKEN"]
+          api=HfApi(); HfFolder.save_token(token)
+          who=api.whoami(token=token); username=who.get("name") or (who.get("orgs") or [None])[0]
+          dataset_repo=f"{username}/tourism-dataset"
+          model_repo=f"{username}/tourism-purchase-predictor-rf"
+          tr=hf_hub_download(dataset_repo,"dataset","data/train.csv",token)
+          te=hf_hub_download(dataset_repo,"dataset","data/test.csv",token)
+          train=pd.read_csv(tr); test=pd.read_csv(te)
+          X_tr=train.drop(columns=["ProdTaken"]); y_tr=train["ProdTaken"].astype(int)
+          X_te=test.drop(columns=["ProdTaken"]); y_te=test["ProdTaken"].astype(int)
+          cat=X_tr.select_dtypes(include=["object","category"]).columns.tolist()
+          num=[c for c in X_tr.columns if c not in cat]
+          pipe=Pipeline([
+            ("prep", ColumnTransformer([
+              ("num", Pipeline([("imp", SimpleImputer(strategy="median")),("sc", StandardScaler())]), num),
+              ("cat", Pipeline([("imp", SimpleImputer(strategy="most_frequent")),("ohe", OneHotEncoder(handle_unknown="ignore", sparse=False))]), cat),
+            ])),
+            ("clf", RandomForestClassifier(random_state=42, class_weight="balanced", n_estimators=300))
+          ])
+          pipe.fit(X_tr,y_tr)
+          y_pred=pipe.predict(X_te)
+          y_prob=pipe.predict_proba(X_te)[:,1]
+          metrics={"accuracy": float(skm.accuracy_score(y_te,y_pred)),
+                   "precision": float(skm.precision_score(y_te,y_pred, zero_division=0)),
+                   "recall": float(skm.recall_score(y_te,y_pred, zero_division=0)),
+                   "f1": float(skm.f1_score(y_te,y_pred, zero_division=0)),
+                   "roc_auc": float(skm.roc_auc_score(y_te,y_prob))}
+          out=Path("tourism_project/model_building/models"); out.mkdir(parents=True, exist_ok=True)
+          joblib.dump(pipe, out/"best_model.joblib")
+          (out/"metrics.json").write_text(json.dumps(metrics, indent=2))
+          create_repo(model_repo, repo_type="model", exist_ok=True, token=token)
+          upload_file(str(out/"best_model.joblib"),"best_model.joblib",model_repo,"model",token)
+          upload_file(str(out/"metrics.json"),"metrics.json",model_repo,"model",token)
+          print(f"Model: https://huggingface.co/{model_repo}")
+          PY
+
+  deploy-hosting:
+    runs-on: ubuntu-latest
+    needs: [model-traning,data-prep,register-dataset]
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "huggingface_hub>=0.24,<0.26"
+      - name: Push files to Frontend Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfApi, HfFolder, upload_file
+          token=os.environ["HF_TOKEN"]
+          api=HfApi(); HfFolder.save_token(token)
+          who=api.whoami(token=token); username=who.get("name") or (who.get("orgs") or [None])[0]
+          space_repo=f"{username}/tourism-predictor-app"
+          for f in ["app.py","requirements.txt"]:
+              if not Path(f).exists(): raise SystemExit(f"{f} not found")
+          readme=Path("README.md")
+          if not readme.exists():
+              readme.write_text("---\ntitle: Tourism Purchase Predictor\nemoji: 🧭\ncolorFrom: green\ncolorTo: blue\nsdk: streamlit\npinned: false\napp_file: app.py\n---", encoding="utf-8")
+          upload_file("app.py","app.py",space_repo,"space",token)
+          upload_file("requirements.txt","requirements.txt",space_repo,"space",token)
+          upload_file("README.md","README.md",space_repo,"space",token)
+          print(f"Space updated: https://huggingface.co/spaces/{space_repo}")
+          PY

@@ -6,11 +6,6 @@ on:
       - main
   workflow_dispatch:
 
-defaults:
-  run:
-    # Ensure all steps run from the project subfolder (note the spaces in the path)
-    working-directory: "Advanced Machine Learning and MLOps/Project"
-
 permissions:
   contents: write
 
@@ -26,6 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Print repo tree (root)
+        run: |
+          echo "Runner PWD: $(pwd)"
+          ls -la
+          echo "--- top-level dirs ---"
+          find . -maxdepth 2 -type d -print | sed 's/^/  /'
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -64,6 +65,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Print repo tree (root)
+        run: |
+          echo "Runner PWD: $(pwd)"
+          ls -la
+          echo "--- repo-root expected dirs ---"
+          ls -la .
+          echo "--- tourism_project dir listing ---"
+          ls -la "tourism_project" || true
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -127,6 +136,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Print repo tree (root)
+        run: |
+          echo "Runner PWD: $(pwd)"
+          ls -la
+          echo "--- repo-root expected dirs ---"
+          ls -la .
+          echo "--- tourism_project dir listing ---"
+          ls -la "tourism_project" || true
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -220,6 +237,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Print repo tree (root)
+        run: |
+          echo "Runner PWD: $(pwd)"
+          ls -la
+          echo "--- repo-root expected files ---"
+          ls -la .
+          echo "--- tourism_project dir listing ---"
+          ls -la "tourism_project" || true
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -240,24 +265,25 @@ jobs:
           who=api.whoami(token=token)
           username=who.get("name") or (who.get("orgs") or [None])[0]
           space_repo=f"{username}/{os.environ.get('SPACE_NAME','tourism-predictor-app')}"
-          # ensure app files exist
-          for p in ["app.py","requirements.txt"]:
-              if not Path(p).exists():
-                  raise SystemExit(f"{p} not found in repo")
-          # write README front-matter if missing
-          readme=Path("README.md")
-          if not readme.exists():
-              readme.write_text("""---
-          title: Tourism Purchase Predictor
-          emoji: 🧭
-          colorFrom: green
-          colorTo: blue
-          sdk: streamlit
-          pinned: false
-          app_file: app.py
-          ---""", encoding="utf-8")
-          upload_file(path_or_fileobj="app.py", path_in_repo="app.py", repo_id=space_repo, repo_type="space", token=token)
-          upload_file(path_or_fileobj="requirements.txt", path_in_repo="requirements.txt", repo_id=space_repo, repo_type="space", token=token)
-          upload_file(path_or_fileobj="README.md", path_in_repo="README.md", repo_id=space_repo, repo_type="space", token=token)
-          print(f"Space updated: https://huggingface.co/spaces/{space_repo}")
+      root=Path(".")
+      # ensure app files exist
+      for p in [root/"app.py", root/"requirements.txt"]:
+        if not p.exists():
+          raise SystemExit(f"{p} not found in repo")
+      # write README front-matter if missing
+      readme=root/"README.md"
+      if not readme.exists():
+        readme.write_text("""---
+      title: Tourism Purchase Predictor
+      emoji: 🧭
+      colorFrom: green
+      colorTo: blue
+      sdk: streamlit
+      pinned: false
+      app_file: app.py
+      ---""", encoding="utf-8")
+      upload_file(path_or_fileobj=str(root/"app.py"), path_in_repo="app.py", repo_id=space_repo, repo_type="space", token=token)
+      upload_file(path_or_fileobj=str(root/"requirements.txt"), path_in_repo="requirements.txt", repo_id=space_repo, repo_type="space", token=token)
+      upload_file(path_or_fileobj=str(readme), path_in_repo="README.md", repo_id=space_repo, repo_type="space", token=token)
+      print(f"Space updated: https://huggingface.co/spaces/{space_repo}")
           PY
